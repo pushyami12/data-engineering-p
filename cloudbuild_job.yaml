@@ -1,0 +1,86 @@
+# Cloud Build pipeline: build image, push to Artifact Registry, deploy Cloud Run Job.
+#
+# Submit:
+#   gcloud builds submit --config=cloudbuild_job.yaml
+
+substitutions:
+  _REGION: asia-south1
+  _REPO: cloudrun-cloudsql-to-bq-jobs-repo
+  _IMAGE_NAME: cloudsql-to-bq-job
+  _JOB_NAME: sales-cloudsql-to-bq-batch-job
+  _SERVICE_ACCOUNT: "cloudrun-workloads-bot@cloud-gcpt-0526.iam.gserviceaccount.com"
+  _INSTANCE_CONNECTION_NAME: "cloud-gcpt-0526:asia-south1:shopeasy"
+  _DB_NAME: "retail_db"
+  _DB_USER: "retail-rw-user"
+  _DB_PASSWORD_SECRET: "CLOUDSQL-RETAIL-DB-PASS"
+  _BQ_DATASET: "shopeasy_sales_analytics"
+  _BQ_TABLE: "orders"
+  _SOURCE_TABLE: orders
+  _ORDER_DATE_COLUMN: order_date
+  _TASK_TIMEOUT: 30m
+  _MAX_RETRIES: "0"
+
+serviceAccount: projects/cloud-gcpt-0526/serviceAccounts/cloud-build-deploy-bot@cloud-gcpt-0526.iam.gserviceaccount.com
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE_NAME}:${SHORT_SHA}
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE_NAME}:latest
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE_NAME}:${SHORT_SHA}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE_NAME}:latest
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE_NAME}
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        IMAGE="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_IMAGE_NAME}:${SHORT_SHA}"
+        ENV_VARS="GCP_PROJECT=${PROJECT_ID}"
+        ENV_VARS="$${ENV_VARS},INSTANCE_CONNECTION_NAME=${_INSTANCE_CONNECTION_NAME}"
+        ENV_VARS="$${ENV_VARS},DB_NAME=${_DB_NAME}"
+        ENV_VARS="$${ENV_VARS},DB_USER=${_DB_USER}"
+        ENV_VARS="$${ENV_VARS},DB_PASSWORD_SECRET=${_DB_PASSWORD_SECRET}"
+        ENV_VARS="$${ENV_VARS},BQ_DATASET=${_BQ_DATASET}"
+        ENV_VARS="$${ENV_VARS},BQ_TABLE=${_BQ_TABLE}"
+        ENV_VARS="$${ENV_VARS},SOURCE_TABLE=${_SOURCE_TABLE}"
+        ENV_VARS="$${ENV_VARS},ORDER_DATE_COLUMN=${_ORDER_DATE_COLUMN}"
+
+        if gcloud run jobs describe "${_JOB_NAME}" --region="${_REGION}" >/dev/null 2>&1; then
+          echo "Updating existing job ${_JOB_NAME}"
+          gcloud run jobs update "${_JOB_NAME}" \
+            --image="$${IMAGE}" \
+            --region="${_REGION}" \
+            --service-account="${_SERVICE_ACCOUNT}" \
+            --max-retries="${_MAX_RETRIES}" \
+            --task-timeout="${_TASK_TIMEOUT}" \
+            --set-env-vars="$${ENV_VARS}"
+        else
+          echo "Creating job ${_JOB_NAME}"
+          gcloud run jobs create "${_JOB_NAME}" \
+            --image="$${IMAGE}" \
+            --region="${_REGION}" \
+            --service-account="${_SERVICE_ACCOUNT}" \
+            --max-retries="${_MAX_RETRIES}" \
+            --task-timeout="${_TASK_TIMEOUT}" \
+            --set-env-vars="$${ENV_VARS}"
+        fi
